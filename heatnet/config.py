@@ -138,11 +138,13 @@ class StationLimits:
 
 @dataclass(frozen=True)
 class PrimaryLimits:
-    """一次网流量基线、容差与调度速率。"""
+    """一次网流量基线、容差、调度速率与抢占工况门限。"""
 
     flow_baseline_t_h: float
     flow_tolerance_t_h: float
     dispatch_rate_pct_s: float
+    urgent_deviation_c: float
+    critical_deviation_c: float
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "PrimaryLimits":
@@ -150,9 +152,13 @@ class PrimaryLimits:
             flow_baseline_t_h=_number(section, "flow_baseline_t_h", minimum=1.0),
             flow_tolerance_t_h=_number(section, "flow_tolerance_t_h", minimum=0.1),
             dispatch_rate_pct_s=_number(section, "dispatch_rate_pct_s", minimum=0.1),
+            urgent_deviation_c=_number(section, "urgent_deviation_c", minimum=0.1),
+            critical_deviation_c=_number(section, "critical_deviation_c", minimum=0.1),
         )
         if limits.flow_tolerance_t_h >= limits.flow_baseline_t_h:
             raise ConfigError("流量容差必须小于基线", component="config")
+        if limits.urgent_deviation_c >= limits.critical_deviation_c:
+            raise ConfigError("急迫偏差门限必须小于紧急偏差门限", component="config")
         return limits
 
     def low_flow_threshold(self, baseline_t_h: float) -> float:
@@ -339,7 +345,7 @@ def default_config() -> PlatformConfig:
         source=SourceLimits(92.0, 115.0, 35.0, 900.0, 4200.0, 12.0, 0.35),
         curve=CurveLimits(-26.0, 18.0, 55.0, 95.0, 1800.0),
         station=StationLimits(60.0, 2.5, 9.0, 8.0),
-        primary=PrimaryLimits(2400.0, 180.0, 4.0),
+        primary=PrimaryLimits(2400.0, 180.0, 4.0, 3.0, 6.0),
         secondary=SecondaryLimits(320.0, 260.0, 420.0, 10.0, 45.0),
         valve=ValveLimits(12.0, 1.5),
         pump=PumpLimits(40.0, 20.0, 100.0),
@@ -380,6 +386,8 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "flow_baseline_t_h": cfg.primary.flow_baseline_t_h,
                 "flow_tolerance_t_h": cfg.primary.flow_tolerance_t_h,
                 "dispatch_rate_pct_s": cfg.primary.dispatch_rate_pct_s,
+                "urgent_deviation_c": cfg.primary.urgent_deviation_c,
+                "critical_deviation_c": cfg.primary.critical_deviation_c,
             },
             "secondary": {
                 "makeup_target_kpa": cfg.secondary.makeup_target_kpa,

@@ -22,6 +22,8 @@ class PrimaryNetwork:
         self._baseline_t_h = limits.flow_baseline_t_h
         self._recalibrations = 0
         self._dispatches = 0
+        self._flow_meter_ok = True
+        self._flow_meter_ok = True
 
     @property
     def limits(self) -> PrimaryLimits:
@@ -97,6 +99,48 @@ class PrimaryNetwork:
 
         self._dispatches += 1
         return self._dispatches
+
+    def flow_meter_ok(self) -> bool:
+        """总流量计是否在线。"""
+
+        return self._flow_meter_ok
+
+    def set_flow_meter(self, ok: bool) -> bool:
+        """切换总流量计状态，返回切换后的状态。"""
+
+        self._flow_meter_ok = bool(ok)
+        return self._flow_meter_ok
+
+    def readback_flow_t_h(self) -> float | None:
+        """回读当前总流量；流量计故障时返回 ``None``。
+
+        回读缺失属于部分失败：调用方不许拿缺失的回读去重算任何站的计划。
+        """
+
+        if not self._flow_meter_ok:
+            return None
+        return self._flow_t_h
+
+    def flow_meter_ok(self) -> bool:
+        """总流量计是否在线（回读是否可信）。"""
+
+        return self._flow_meter_ok
+
+    def set_flow_meter(self, ok: bool) -> bool:
+        """切换总流量计状态，返回切换后的状态。"""
+
+        self._flow_meter_ok = bool(ok)
+        return self._flow_meter_ok
+
+    def readback_flow_t_h(self) -> float | None:
+        """回读当前总流量；流量计故障时返回 ``None``。
+
+        回读缺失属于部分失败：调用方不许拿缺失的回读去重算任何站的计划。
+        """
+
+        if not self._flow_meter_ok:
+            return None
+        return self._flow_t_h
 
     def deviation_t_h(self) -> float:
         """返回当前总流量相对基线的偏差。"""

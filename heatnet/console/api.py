@@ -58,11 +58,14 @@ class Api:
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/store", self._store)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/batches", self._batches)
+        add("GET", "/api/batch/{id}", self._batch)
         add("POST", "/api/weather", self._weather)
         add("POST", "/api/adjust", self._adjust)
         add("POST", "/api/startup", self._startup)
         add("POST", "/api/shutdown", self._shutdown)
         add("POST", "/api/dispatch", self._dispatch)
+        add("POST", "/api/flow/meter", self._flow_meter)
         add("POST", "/api/cycle", self._cycle)
         add("POST", "/api/calibrate", self._calibrate)
         add("POST", "/api/retrofit", self._retrofit)
@@ -248,6 +251,12 @@ class Api:
         }
         return {"ready": all(checks.values()), "checks": checks, "info": info}
 
+    def _batches(self, params: dict, body: dict) -> dict:
+        return self._platform.batches_report(limit=int(params.get("limit", 20)))
+
+    def _batch(self, params: dict, body: dict) -> dict:
+        return self._platform.batch_detail(str(params.get("id", "")))
+
     # ---- 动作 ---------------------------------------------------------
 
     def _weather(self, params: dict, body: dict) -> dict:
@@ -282,6 +291,9 @@ class Api:
             selected,
             cancel,
         )
+
+    def _flow_meter(self, params: dict, body: dict) -> dict:
+        return self._platform.set_flow_meter(bool(body.get("ok", True)))
 
     def _cycle(self, params: dict, body: dict) -> dict:
         return self._platform.cycle(_as_float(body, "dt", 1.0))

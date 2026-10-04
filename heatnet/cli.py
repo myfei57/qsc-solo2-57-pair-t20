@@ -112,7 +112,17 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "preview": preview[:3],
         "dispatch": {
             key: dispatch[key]
-            for key in ("ok", "planned", "adjusted", "target_c", "flow_t_h", "threshold_t_h", "violations")
+            for key in (
+                "ok",
+                "condition",
+                "strategy",
+                "planned",
+                "adjusted",
+                "target_c",
+                "flow_t_h",
+                "threshold_t_h",
+                "violations",
+            )
         },
         "cycles_run": len(cycles),
         "last_cycle": cycles[-1],

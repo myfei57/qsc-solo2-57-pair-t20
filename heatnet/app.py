@@ -39,6 +39,7 @@ from .source.source import HeatSource
 from .source.weather import WeatherPush, push_weather
 from .station.batch import build_plan
 from .station.mapping import StationMapping
+from .station.preempt import BatchRegistry
 from .station.service import CancelToken, StationService
 from .station.station import HeatStation
 from .store.command import CommandCheckpoint
@@ -93,6 +94,8 @@ class Platform:
         self.topology: Topology = build_default_topology()
         self.trend = TrendBuffer(period_s=self.config.quota.sample_period_s)
         self.ids = IdFactory("op")
+        self.batch_ids = IdFactory("batch")
+        self.batches = BatchRegistry()
 
         self.zones = ZoneRegistry()
         self.curve = HeatCurve(self.config.curve)
@@ -197,6 +200,7 @@ class Platform:
             records = self.audit.to_records(self.audit.replay_from_journal(limit=100_000))
         except PlantError:
             return
+        self.batches.load_records(records)
         trips = [item for item in records if item.action == "trip"]
         if trips:
             reason = str(trips[-1].payload.get("reason", "unknown"))
@@ -383,7 +387,7 @@ class Platform:
         zones: list[str] | None = None,
         cancel: CancelToken | None = None,
     ) -> dict:
-        """按分区下发一次调度。"""
+        """按分区下发一次调度（急迫/紧急工况自动走抢占编排）。"""
 
         with self._lock:
             selected = list(zones) if zones else self.zones.names()
@@ -394,15 +398,61 @@ class Platform:
                 self.mapping,
                 self.zones,
                 self.network,
+                self.stations,
                 selected,
                 demand_pct,
                 setpoint,
                 cancel,
+                run_id=op_id,
+                batch_ids=self.batch_ids,
+                now=self.clock.now(),
             )
+            for event in report.pop("audit_events", []):
+                self.bus.publish(
+                    Event.of(
+                        "dispatch",
+                        "dispatch",
+                        event["action"],
+                        op_id=op_id,
+                        severity=event.get("severity", "notice"),
+                        message=event.get("message", ""),
+                        **event.get("payload", {}),
+                    )
+                )
+            for batch in report.get("batches", []):
+                self.batches.add(batch)
             summary = self._record_operation(op_id, "dispatch", report)
             self._operations += 1
             self._persist()
             return {**report, **summary}
+
+    def set_flow_meter(self, ok: bool) -> dict:
+        """切换一次网总流量计状态；回读缺失时抢占一律按部分失败处理。"""
+
+        with self._lock:
+            state = self.network.set_flow_meter(ok)
+            self.bus.publish(
+                Event.of(
+                    "primary",
+                    "primary",
+                    "flow_meter",
+                    severity="notice" if state else "warning",
+                    message="总流量计恢复" if state else "总流量计故障：回读缺失",
+                    flow_meter_ok=state,
+                )
+            )
+            return {"flow_meter_ok": state}
+
+    def batches_report(self, limit: int = 20) -> dict:
+        """返回最近的下发批次（最新的在前），供控制台展示。"""
+
+        batches = self.batches.recent(limit)
+        return {"count": len(batches), "batches": batches}
+
+    def batch_detail(self, batch_id: str) -> dict:
+        """按标识取一个下发批次。"""
+
+        return {"batch": self.batches.get(str(batch_id))}
 
     def calibrate_flow(self, measured_t_h: float) -> dict:
         """按实测流量重新标定一次网基线。"""
@@ -790,6 +840,7 @@ class Platform:
             "primary": {
                 **self.network.snapshot().as_dict(),
                 "deviation_t_h": round(self.network.deviation_t_h(), 2),
+                "flow_meter_ok": self.network.flow_meter_ok(),
             },
             "secondary": self.secondary.snapshot().as_dict(),
             "pressure": self.pressure_report(),

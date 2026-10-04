@@ -29,7 +29,9 @@
     "primary": {
       "flow_baseline_t_h": 2400.0,
       "flow_tolerance_t_h": 180.0,
-      "dispatch_rate_pct_s": 4.0
+      "dispatch_rate_pct_s": 4.0,
+      "urgent_deviation_c": 3.0,
+      "critical_deviation_c": 6.0
     },
     "secondary": {
       "makeup_target_kpa": 320.0,

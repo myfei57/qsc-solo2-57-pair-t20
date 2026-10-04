@@ -87,6 +87,50 @@ class StationService:
 
         return self._aborted
 
+    def adjust_stations(
+        self,
+        station_names: list[str],
+        target_c: float,
+        cancel: CancelToken | None = None,
+        dt: float = 1.0,
+        zone: str = "",
+    ) -> dict:
+        """按给定顺序逐站调节，每处理一个站之前都检查取消信号。"""
+
+        if dt <= 0:
+            raise ValueError("步长必须为正")
+        members = [str(name) for name in station_names]
+        steps: list[dict] = []
+        adjusted: list[str] = []
+        self._batches += 1
+        for station_name in members:
+            if cancel is not None and cancel.cancelled():
+                self._aborted += 1
+                return {
+                    "ok": False,
+                    "zone": zone,
+                    "steps": steps,
+                    "adjusted": adjusted,
+                    "skipped": members[len(adjusted):],
+                    "violations": [f"cancelled:{cancel.reason()}"],
+                }
+            station = self.get(station_name)
+            valve = self.valve(station_name)
+            detail = apply_mix(station, valve, self._durable, target_c, dt)
+            self._durable.save(
+                f"station/{station_name}", {"zone": zone or station.zone(), "target_c": target_c}
+            )
+            adjusted.append(station_name)
+            steps.append({"component": "station", "action": "adjust", "detail": detail})
+        return {
+            "ok": True,
+            "zone": zone,
+            "steps": steps,
+            "adjusted": adjusted,
+            "skipped": [],
+            "violations": [],
+        }
+
     def adjust_zone(
         self,
         mapping: StationMapping,
@@ -97,34 +141,6 @@ class StationService:
     ) -> dict:
         """调节一个分区里的全部换热站，每一步都检查取消信号。"""
 
-        if dt <= 0:
-            raise ValueError("步长必须为正")
-        members = mapping.stations_in(zone_name)
-        steps: list[dict] = []
-        adjusted: list[str] = []
-        self._batches += 1
-        for station_name in members:
-            if cancel is not None and cancel.cancelled():
-                self._aborted += 1
-                return {
-                    "ok": False,
-                    "zone": zone_name,
-                    "steps": steps,
-                    "adjusted": adjusted,
-                    "skipped": members[len(adjusted):],
-                    "violations": [f"cancelled:{cancel.reason()}"],
-                }
-            station = self.get(station_name)
-            valve = self.valve(station_name)
-            detail = apply_mix(station, valve, self._durable, target_c, dt)
-            self._durable.save(f"station/{station_name}", {"zone": zone_name, "target_c": target_c})
-            adjusted.append(station_name)
-            steps.append({"component": "station", "action": "adjust", "detail": detail})
-        return {
-            "ok": True,
-            "zone": zone_name,
-            "steps": steps,
-            "adjusted": adjusted,
-            "skipped": [],
-            "violations": [],
-        }
+        return self.adjust_stations(
+            mapping.stations_in(zone_name), target_c, cancel, dt, zone=zone_name
+        )

@@ -10,17 +10,25 @@ from __future__ import annotations
 from .batch import build_plan, run_batch
 from .mapping import StationMapping
 from .mix import apply_mix
+from .preempt import BatchRegistry, DispatchBatch, run_preemptive
+from .priority import deviation_c, urgency_order, urgent_stations
 from .service import CancelToken, StationService
 from .station import HeatStation
 from .state import StationSnapshot
 
 __all__ = [
+    "BatchRegistry",
     "CancelToken",
+    "DispatchBatch",
     "HeatStation",
     "StationMapping",
     "StationService",
     "StationSnapshot",
     "apply_mix",
     "build_plan",
+    "deviation_c",
     "run_batch",
+    "run_preemptive",
+    "urgency_order",
+    "urgent_stations",
 ]
