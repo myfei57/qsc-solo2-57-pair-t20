@@ -4,6 +4,7 @@
 
 ``serve``   启动控制台 HTTP 服务，可选地在启动后探测接口；
 ``demo``    在本地跑一遍完整流程（气象推送 → 调质调量 → 投运 → 调度下发 →
+            急站抢占下发（含让位批按新总流量重算）→
             控制周期 → 流量标定 → 定压改造 → 二次网循环 → 热量采集与结算 →
             分区拆分 → 阀门队列回放 → 停机与复位），用于交付前的真实运行检查；
 ``status``  打印当前状态快照；
@@ -85,6 +86,14 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     launch = platform.startup(args.outdoor_c, args.demand_pct, "demo-operator")
     preview = platform.plan_preview(args.demand_pct)
     dispatch = platform.dispatch(args.demand_pct, args.target_c, None, None)
+    preempted = platform.dispatch(
+        args.demand_pct,
+        args.target_c,
+        None,
+        None,
+        urgent=[args.urgent_station],
+        mode=args.preempt_mode,
+    )
     cycles = [platform.cycle(dt=args.dt) for _ in range(args.cycles)]
     calibration = platform.calibrate_flow(args.baseline_t_h)
     retrofit = platform.retrofit_baseline(args.baseline_kpa)
@@ -114,6 +123,26 @@ def _cmd_demo(args: argparse.Namespace) -> int:
             key: dispatch[key]
             for key in ("ok", "planned", "adjusted", "target_c", "flow_t_h", "threshold_t_h", "violations")
         },
+        "preempted_dispatch": {
+            "ok": preempted["ok"],
+            "mode": preempted["mode"],
+            "priority_rule": preempted["priority_rule"],
+            "readback_total_t_h": preempted["readback_total_t_h"],
+            "preemptions": preempted["preemptions"],
+            "batches": [
+                {
+                    "batch_id": batch["batch_id"],
+                    "priority": batch["priority"],
+                    "dispatched": batch["dispatched"],
+                    "preempted": batch["preempted"],
+                    "preempted_by": batch["preempted_by"],
+                    "stations": batch["stations"],
+                    "total_t_h": batch["total_t_h"],
+                }
+                for batch in preempted["batches"]
+            ],
+            "violations": preempted["violations"],
+        },
         "cycles_run": len(cycles),
         "last_cycle": cycles[-1],
         "calibration": calibration,
@@ -138,6 +167,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         ("weather", weather),
         ("launch", launch),
         ("dispatch", dispatch),
+        ("preempted_dispatch", preempted),
         ("secondary", secondary),
         ("retrofit", retrofit),
         ("concurrency", concurrency),
@@ -205,6 +235,17 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--sample-mwh", type=float, default=12.5, help="每次热量采集的增量 (MWh)")
     demo.add_argument("--disturb", type=float, default=0.4, help="演示用的二次网热负荷扰动系数")
     demo.add_argument("--station", default="st01", help="演示用的换热站")
+    demo.add_argument(
+        "--urgent-station",
+        default="st05",
+        help="抢占演示里的急站（按偏差点名，默认取末端站 st05）",
+    )
+    demo.add_argument(
+        "--preempt-mode",
+        choices=("urgent_first", "recompute_first"),
+        default="urgent_first",
+        help="抢占工况：先发急站再重算（默认）或先全体重算再按优先级发",
+    )
     demo.add_argument("--split-zone", default="north", help="演示拆分源分区")
     demo.add_argument("--new-zone", default="north-west", help="演示拆分出的新分区")
     demo.add_argument("--split-stations", nargs="*", default=["st02", "st03"], help="划入新分区的站")

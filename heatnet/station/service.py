@@ -87,42 +87,49 @@ class StationService:
 
         return self._aborted
 
-    def adjust_zone(
+    def adjust_stations(
         self,
-        mapping: StationMapping,
-        zone_name: str,
+        zone_of: dict[str, str],
+        station_names: list[str],
         target_c: float,
         cancel: CancelToken | None = None,
         dt: float = 1.0,
+        label: str = "station",
     ) -> dict:
-        """调节一个分区里的全部换热站，每一步都检查取消信号。"""
+        """按给定站序逐个调节，每处理一个站之前都重新看一次取消信号。
+
+        抢占下发按站序而不是按分区调用本方法：急站批先发、让位批后发，两批
+        各自的站序由上层编排按偏差定死。每个站落盘时仍写自己真实的分区名，
+        ``label`` 只用来在审计里区分它属于哪一批。
+        """
 
         if dt <= 0:
             raise ValueError("步长必须为正")
-        members = mapping.stations_in(zone_name)
         steps: list[dict] = []
         adjusted: list[str] = []
         self._batches += 1
-        for station_name in members:
+        for station_name in station_names:
             if cancel is not None and cancel.cancelled():
                 self._aborted += 1
                 return {
                     "ok": False,
-                    "zone": zone_name,
+                    "zone": label,
                     "steps": steps,
                     "adjusted": adjusted,
-                    "skipped": members[len(adjusted):],
+                    "skipped": station_names[len(adjusted):],
                     "violations": [f"cancelled:{cancel.reason()}"],
                 }
             station = self.get(station_name)
             valve = self.valve(station_name)
+            zone_name = zone_of.get(station_name, station.zone())
             detail = apply_mix(station, valve, self._durable, target_c, dt)
+            detail["batch"] = label
             self._durable.save(f"station/{station_name}", {"zone": zone_name, "target_c": target_c})
             adjusted.append(station_name)
             steps.append({"component": "station", "action": "adjust", "detail": detail})
         return {
             "ok": True,
-            "zone": zone_name,
+            "zone": label,
             "steps": steps,
             "adjusted": adjusted,
             "skipped": [],

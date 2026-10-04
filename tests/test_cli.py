@@ -18,6 +18,10 @@ def test_demo_runs_end_to_end(tmp_path, capsys):
     assert payload["launch"]["stage"] == "done"
     assert payload["dispatch"]["ok"] is True
     assert payload["dispatch"]["planned"] == 6
+    assert payload["preempted_dispatch"]["ok"] is True
+    assert payload["preempted_dispatch"]["priority_rule"] == "deviation"
+    assert payload["preempted_dispatch"]["preemptions"][0]["preempted_batch"] == "b2"
+    assert payload["preempted_dispatch"]["batches"][0]["priority"] == "urgent"
     assert payload["secondary"]["pump_idle"] is True
     assert payload["retrofit"]["ok"] is True
     assert payload["split"]["zone"]["stations"] == ["st02", "st03"]

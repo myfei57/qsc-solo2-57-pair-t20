@@ -98,6 +98,65 @@ def test_api_timeline_journal_and_store(platform):
     assert isinstance(store["documents"], list)
 
 
+def test_api_dispatch_with_priority_preemption_and_batches(platform):
+    api = Api(platform)
+    platform.start()
+    platform.push_weather(-8.0)
+    platform.startup(-8.0, 60.0)
+    # 急站抢占：st04 先算先发，其余站让位后按新总流量重算。
+    status, report = api.handle(
+        "POST",
+        "/api/dispatch",
+        {},
+        {"demand_pct": 55.0, "urgent": ["st04"], "mode": "urgent_first"},
+    )
+    assert status == 200
+    assert report["ok"] is True
+    assert report["priority_rule"] == "deviation"
+    assert report["batches"][0]["priority"] == "urgent"
+    assert report["batches"][0]["stations"] == ["st04"]
+    assert report["batches"][1]["preempted"] is True
+    assert report["batches"][1]["preempted_by"] == "b1"
+
+    # 批次台账供控制台展示。
+    status, batches = api.handle("GET", "/api/dispatch/batches", {"limit": "10"}, {})
+    assert status == 200
+    assert batches["count"] == 2
+    assert batches["priority_rule"] == "deviation"
+    assert batches["batches"][0]["priority"] == "normal"
+    assert {f["station"] for f in batches["batches"][1]["flows"]} == {"st04"}
+
+    # recompute_first 模式同样可达。
+    status, report2 = api.handle(
+        "POST",
+        "/api/dispatch",
+        {},
+        {"demand_pct": 55.0, "urgent": ["st06"], "mode": "recompute_first"},
+    )
+    assert status == 200
+    assert report2["mode"] == "recompute_first"
+
+    # 非法抢占模式被 409 拦下。
+    status, bad = api.handle(
+        "POST", "/api/dispatch", {}, {"urgent": ["st01"], "mode": "station_order"}
+    )
+    assert status == 409
+    assert bad["component"] == "console"
+
+    # 总流量回读缺失：部分失败，不许抢占。
+    status, missing = api.handle(
+        "POST",
+        "/api/dispatch",
+        {},
+        {"urgent": ["st01"], "mode": "urgent_first", "flow_readback": False},
+    )
+    assert status == 200
+    assert missing["ok"] is False
+    assert "flow_readback_missing" in missing["violations"]
+    assert missing["preemptions"] == []
+    assert missing["batches"][1]["dispatched"] is False
+
+
 def test_api_actions_cover_queue_and_meter(platform):
     api = Api(platform)
     status, queued = api.handle("POST", "/api/dispatch", {}, {"demand_pct": 55.0, "zones": ["north"]})

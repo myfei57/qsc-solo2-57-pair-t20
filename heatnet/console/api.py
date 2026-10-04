@@ -7,9 +7,10 @@
 
 from __future__ import annotations
 
-from ..app import Platform
+from ..app import READBACK_MISSING, Platform
 from ..audit.timeline import build_timeline
 from ..errors import PlantError
+from ..station.preempt import MODE_RECOMPUTE_FIRST, MODE_URGENT_FIRST
 from ..station.service import CancelToken
 from .router import Router
 
@@ -58,6 +59,7 @@ class Api:
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/store", self._store)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/dispatch/batches", self._dispatch_batches)
         add("POST", "/api/weather", self._weather)
         add("POST", "/api/adjust", self._adjust)
         add("POST", "/api/startup", self._startup)
@@ -248,6 +250,17 @@ class Api:
         }
         return {"ready": all(checks.values()), "checks": checks, "info": info}
 
+    def _dispatch_batches(self, params: dict, body: dict) -> dict:
+        """下发批次台账：控制台据此展示每一批的站、流量、抢占方与下发状态。"""
+
+        limit = int(params.get("limit", 32))
+        batches = self._platform.dispatch_batches(limit=limit)
+        return {
+            "count": len(batches),
+            "priority_rule": "deviation",
+            "batches": batches,
+        }
+
     # ---- 动作 ---------------------------------------------------------
 
     def _weather(self, params: dict, body: dict) -> dict:
@@ -275,12 +288,25 @@ class Api:
     def _dispatch(self, params: dict, body: dict) -> dict:
         zones = body.get("zones")
         selected = None if not zones else [str(item) for item in zones]
+        urgent = body.get("urgent")
+        urgent_names = None if not urgent else [str(item) for item in urgent]
+        mode = str(body.get("mode", MODE_URGENT_FIRST))
+        if mode not in (MODE_URGENT_FIRST, MODE_RECOMPUTE_FIRST):
+            raise PlantError(
+                f"抢占模式必须是 {MODE_URGENT_FIRST!r} 或 {MODE_RECOMPUTE_FIRST!r}",
+                component="console",
+            )
+        # flow_readback=false 表示现场总流量回读口没有读数：部分失败，不许抢占。
+        readback = READBACK_MISSING if body.get("flow_readback") is False else None
         cancel = CancelToken(str(body.get("cancel_reason", "console-cancel"))) if body.get("cancel") else None
         return self._platform.dispatch(
             _as_float(body, "demand_pct", 60.0),
             _as_float(body, "target_c", self._platform.config.station.setpoint_c),
             selected,
             cancel,
+            urgent_names,
+            mode,
+            readback,
         )
 
     def _cycle(self, params: dict, body: dict) -> dict:

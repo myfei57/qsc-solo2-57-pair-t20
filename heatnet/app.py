@@ -39,6 +39,7 @@ from .source.source import HeatSource
 from .source.weather import WeatherPush, push_weather
 from .station.batch import build_plan
 from .station.mapping import StationMapping
+from .station.preempt import MODE_URGENT_FIRST, MODE_RECOMPUTE_FIRST
 from .station.service import CancelToken, StationService
 from .station.station import HeatStation
 from .store.command import CommandCheckpoint
@@ -55,6 +56,14 @@ from .valve.valve import Valve
 
 DEFAULT_UNIT = "heatnet"
 DEFAULT_ZONE = "north"
+DISPATCH_BATCH_LEDGER_LIMIT = 128
+
+# 下发抢占模式在此登记，控制台与命令行只能从这两种工况里选，不允许出现第三种。
+DISPATCH_MODES = dict((mode, mode) for mode in (MODE_URGENT_FIRST, MODE_RECOMPUTE_FIRST))
+
+# 总流量回读"缺失"的调用方哨兵：传进 dispatch 表示本轮回读口没有读数，
+# 编排据此判定部分失败并禁止抢占。
+READBACK_MISSING = object()
 
 # 分区布置：三个供热分区各自带若干换热站，拆分演示从 north 里划出一个新分区。
 _ZONE_SPECS: tuple[tuple[str, float, tuple[str, ...]], ...] = (
@@ -93,6 +102,8 @@ class Platform:
         self.topology: Topology = build_default_topology()
         self.trend = TrendBuffer(period_s=self.config.quota.sample_period_s)
         self.ids = IdFactory("op")
+        self._dispatch_batches: list[dict] = []
+        self._dispatch_seq = 0
 
         self.zones = ZoneRegistry()
         self.curve = HeatCurve(self.config.curve)
@@ -187,6 +198,12 @@ class Platform:
         if isinstance(state, dict):
             self._operations = int(state.get("operations", 0))
             self._cycles = int(state.get("cycles", 0))
+        saved_batches = self.durable.load("dispatch/batches")
+        if isinstance(saved_batches, dict):
+            batches = saved_batches.get("batches")
+            if isinstance(batches, list):
+                self._dispatch_batches = [dict(item) for item in batches if isinstance(item, dict)]
+                self._dispatch_seq = int(saved_batches.get("seq", self._dispatch_seq or 0))
         for name, valve in self.valves.items():
             load_valve(valve, self.durable)
             applied = self.checkpoint.load(name)
@@ -382,13 +399,24 @@ class Platform:
         target_c: float | None = None,
         zones: list[str] | None = None,
         cancel: CancelToken | None = None,
+        urgent: list[str] | None = None,
+        mode: str = MODE_URGENT_FIRST,
+        readback: object | None = None,
     ) -> dict:
-        """按分区下发一次调度。"""
+        """按偏差优先级下发一次调度，可带急站抢占。
 
+        ``urgent`` 为急站名列表；``mode`` 选抢占工况（先发急站再重算／先全体
+        重算再按优先级发）；``readback`` 传 :data:`READBACK_MISSING` 表示总流量
+        回读缺失（部分失败，不许抢占），缺省读管网当前总流量。
+        """
+
+        if mode not in DISPATCH_MODES:
+            raise ValueError(f"未知抢占模式: {mode}")
         with self._lock:
             selected = list(zones) if zones else self.zones.names()
             setpoint = self.config.station.setpoint_c if target_c is None else float(target_c)
             op_id = self.ids.next()
+            readback_fn = (lambda: None) if readback is READBACK_MISSING else None
             report = dispatch_demand(
                 self.service,
                 self.mapping,
@@ -398,11 +426,106 @@ class Platform:
                 demand_pct,
                 setpoint,
                 cancel,
+                1.0,
+                list(urgent or []),
+                mode,
+                readback_fn,
             )
             summary = self._record_operation(op_id, "dispatch", report)
+            self._record_dispatch_batches(op_id, report)
             self._operations += 1
             self._persist()
             return {**report, **summary}
+
+    def _record_dispatch_batches(self, op_id: str, report: dict) -> None:
+        """把每个下发批次逐条落审计，并把批次台账落盘供控制台展示。
+
+        批次、流量与审计的口径在这里对齐：台账里的每个站的流量取自编排报告的
+        同一批记录，审计事件与落盘台账是同一份快照，不允许两边各写一份。
+        """
+
+        for batch in report.get("batches", []):
+            self._dispatch_seq += 1
+            entry = {
+                "seq": self._dispatch_seq,
+                "op_id": op_id,
+                "batch_id": batch["batch_id"],
+                "priority": batch["priority"],
+                "mode": batch["mode"],
+                "dispatched": bool(batch["dispatched"]),
+                "skipped": list(batch["skipped"]),
+                "preempted": bool(batch["preempted"]),
+                "preempted_by": batch["preempted_by"],
+                "stations": list(batch["stations"]),
+                "total_t_h": batch["total_t_h"],
+                "based_on_total_t_h": batch["based_on_total_t_h"],
+                "flows": [dict(flow) for flow in batch["flows"]],
+            }
+            self._dispatch_batches.append(entry)
+            self.bus.publish(
+                Event.of(
+                    "dispatch",
+                    "primary",
+                    "dispatch_batch",
+                    severity="notice" if batch["dispatched"] else "warning",
+                    message=(
+                        f"批次 {batch['batch_id']} 已下发"
+                        if batch["dispatched"]
+                        else f"批次 {batch['batch_id']} 未下发"
+                    ),
+                    op_id=op_id,
+                    seq=entry["seq"],
+                    batch_id=entry["batch_id"],
+                    priority=entry["priority"],
+                    mode=entry["mode"],
+                    dispatched=entry["dispatched"],
+                    skipped=list(entry["skipped"]),
+                    preempted=entry["preempted"],
+                    preempted_by=entry["preempted_by"],
+                    stations=list(entry["stations"]),
+                    total_t_h=entry["total_t_h"],
+                    based_on_total_t_h=entry["based_on_total_t_h"],
+                    flows=list(batch["flows"]),
+                )
+            )
+        for preemption in report.get("preemptions", []):
+            self.bus.publish(
+                Event.of(
+                    "dispatch",
+                    "primary",
+                    "batch_preempted",
+                    severity="warning",
+                    message=(
+                        f"批次 {preemption['preempted_batch']} 被 {preemption['by_batch']} 抢占，"
+                        f"让位站按新总流量 {preemption['new_total_t_h']} t/h 重算"
+                    ),
+                    op_id=op_id,
+                    **preemption,
+                )
+            )
+        for violation in report.get("violations", []):
+            if violation == "flow_readback_missing":
+                self.bus.publish(
+                    Event.of(
+                        "dispatch",
+                        "primary",
+                        "flow_readback_missing",
+                        severity="alarm",
+                        message="总流量回读缺失：部分失败，本次不许抢占",
+                        op_id=op_id,
+                    )
+                )
+        del self._dispatch_batches[: max(0, len(self._dispatch_batches) - DISPATCH_BATCH_LEDGER_LIMIT)]
+        self.durable.save(
+            "dispatch/batches",
+            {"seq": self._dispatch_seq, "batches": list(self._dispatch_batches)},
+        )
+
+    def dispatch_batches(self, limit: int = 32) -> list[dict]:
+        """返回最近的下发批次（最新在前），供控制台展示。"""
+
+        with self._lock:
+            return list(reversed(self._dispatch_batches[-limit:]))
 
     def calibrate_flow(self, measured_t_h: float) -> dict:
         """按实测流量重新标定一次网基线。"""
@@ -765,7 +888,14 @@ class Platform:
     def plan_preview(self, demand_pct: float) -> list[dict]:
         """预览一次调度计划（不触碰设备）。"""
 
-        plan = build_plan(self.mapping, self.zones, self.zones.names(), demand_pct)
+        names = self.zones.names()
+        target_c = self.config.station.setpoint_c
+        deviations = {
+            name: abs(float(target_c) - self.stations[name].supply_c())
+            for zone_name in names
+            for name in self.mapping.stations_in(zone_name)
+        }
+        plan = build_plan(self.mapping, self.zones, names, demand_pct, deviations)
         flows = batch_flows(self.network, plan)
         self.network.set_flow(sum(flow.flow_t_h for flow in flows))
         return [flow.as_dict() for flow in flows]
@@ -812,6 +942,11 @@ class Platform:
             },
             "zones": self.zones.describe(),
             "mapping": self.mapping.describe(),
+            "dispatch": {
+                "priority_rule": "deviation",
+                "modes": list(DISPATCH_MODES),
+                "batches": self.dispatch_batches(limit=16),
+            },
             "quota": self.quota_report(),
             "store": self.metrics.summary(),
             "audit": self.audit.summary(),
